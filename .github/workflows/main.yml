@@ -1,0 +1,120 @@
+name: Windows 11 Business Downloader Release
+
+on: 
+    workflow_dispatch:      # 允许手动触发
+
+permissions:
+  contents: write
+  
+jobs:
+  run-and-release:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          # 程序1：Windows11BusinessDownloader.exe
+          - program_base: "Windows11BusinessDownloader"
+            index: 0
+            last_index: 0  # 总程序数-1（当前3个程序，最后索引为2）
+                      
+    steps:
+      # 步骤1：拉取仓库代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      # 步骤2：运行当前程序（带.exe后缀）
+      - name: 运行 ${{ matrix.program_base }}.exe
+        run: |
+          # 强制使用绝对路径（避免相对路径解析问题）
+          $repoRoot = $env:GITHUB_WORKSPACE  # GitHub 工作流的仓库根目录绝对路径
+          $exePath = Join-Path $repoRoot "${{ matrix.program_base }}.exe"
+          
+          # 再次确认文件存在（带绝对路径检查）
+          if (-not (Test-Path $exePath -PathType Leaf)) {
+            Write-Error "绝对路径下未找到文件：$exePath`n请确认文件已上传到仓库根目录"
+            exit 1
+          }
+          
+          # 检查文件权限（是否可执行）
+          $filePerms = (Get-Item $exePath).Attributes
+          Write-Host "文件权限：$filePerms"  # 调试输出权限信息
+          if ($filePerms -match "ReadOnly") {
+            Write-Warning "文件为只读，尝试移除只读属性"
+            Set-ItemProperty -Path $exePath -Name IsReadOnly -Value $false
+          }
+          
+          # 强制以可执行方式运行（使用 & 并指定完整路径）
+          Write-Host "尝试运行：$exePath"
+          & $exePath
+          
+          # 检查程序是否成功执行
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "$exePath 执行失败，退出码：$LASTEXITCODE"
+            exit $LASTEXITCODE
+          }
+        shell: pwsh
+        env:
+          # 临时放宽 PowerShell 执行策略（仅当前步骤有效）
+          PSExecutionPolicyPreference: Bypass
+          
+      # 步骤3：读取程序专属的标签和标题文件
+      - name: 读取 ${{ matrix.program_base }} 的标签和标题
+        id: read_info
+        run: |
+          $programBase = "${{ matrix.program_base }}"
+          # 定义专属文件名（程序名.tag.txt 和 程序名.title.txt）
+          $tagFile = "$programBase.tag.txt"
+          $titleFile = "$programBase.title.txt"
+          
+          # 1. 检查文件是否存在
+          if (-not (Test-Path $tagFile -PathType Leaf)) {
+            Write-Error "标签文件 $tagFile 不存在，请检查程序是否正常生成"
+            exit 1
+          }
+          if (-not (Test-Path $titleFile -PathType Leaf)) {
+            Write-Error "标题文件 $titleFile 不存在，请检查程序是否正常生成"
+            exit 1
+          }
+          
+          # 2. 安全读取文件内容（避免空值错误）
+          $tagContent = (Get-Content $tagFile -Raw).Trim()
+          $titleContent = (Get-Content $titleFile -Raw).Trim()
+          
+          # 3. 验证内容不为空
+          if ([string]::IsNullOrWhiteSpace($tagContent)) {
+            Write-Error "$tagFile 内容为空，请检查程序输出"
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($titleContent)) {
+            Write-Error "$titleFile 内容为空，请检查程序输出"
+            exit 1
+          }
+          
+          # 4. 输出到环境变量供后续步骤使用
+          echo "tag=$tagContent" >> $env:GITHUB_OUTPUT
+          echo "title=$titleContent" >> $env:GITHUB_OUTPUT
+        shell: pwsh
+        
+      # 步骤5：发布Release（仅当标签不存在时）
+      - name: 发布 ${{ matrix.program_base }} 到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.read_info.outputs.tag }}
+          name: ${{ steps.read_info.outputs.title }}
+          files: ./downloading/*  # 上传下载的文件（若需隔离可改为 ./downloading_${{ matrix.program_base }}/*）
+          body: |
+            自动发布于 ${{ github.event.head_commit.timestamp }}
+            程序名称：${{ matrix.program_base }}
+            运行编号：${{ github.run_number }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 步骤6：清理下载目录（非最后一个程序时执行）
+      - name: 清理下载文件夹
+        if: ${{ matrix.index != matrix.last_index }}
+        run: |
+          if (Test-Path ./downloading) {
+            Remove-Item ./downloading/* -Recurse -Force
+            Write-Host "已清理 downloading 文件夹，准备处理下一个程序"
+          }
+        shell: pwsh
